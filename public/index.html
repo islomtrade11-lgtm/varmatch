@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>VarMatch v1.0</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        body { font-family: 'Arial', sans-serif; background: #0f0f0f; color: #fff; margin: 0; }
+        .container { max-width: 900px; margin: 20px auto; padding: 20px; }
+        .match-card { background: #222; padding: 15px; margin-bottom: 10px; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .btn { background: #e50914; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; }
+        video { width: 100%; border-radius: 8px; margin-top: 20px; display: none; background: #000; }
+        h1 { color: #e50914; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>VarMatch TV <small style="font-size: 12px; color: gray;">v1.0</small></h1>
+        <div id="status">Загрузка актуальных трансляций...</div>
+        <video id="video" controls></video>
+        <div id="list"></div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const hls = new Hls();
+
+        async function loadMatches() {
+            const res = await fetch('/api/matches');
+            const data = await res.json();
+            const list = document.getElementById('list');
+            document.getElementById('status').innerText = data.length ? 'Прямые трансляции:' : 'Стримов пока нет, воркер ищет...';
+            
+            list.innerHTML = data.map(m => `
+                <div class="match-card">
+                    <span>${m.title.toUpperCase()}</span>
+                    <button class="btn" onclick="playStream('${m.stream}')">Смотреть</button>
+                </div>
+            `).join('');
+        }
+
+        function playStream(url) {
+            video.style.display = 'block';
+            if (Hls.isSupported()) {
+                hls.loadSource(url);
+                hls.attachMedia(video);
+                video.play();
+            }
+            window.scrollTo(0, 0);
+        }
+
+        loadMatches();
+        setInterval(loadMatches, 60000); // Обновлять список каждую минуту
+    </script>
+</body>
+</html>
