@@ -116,7 +116,8 @@
               <span class="team">${m.awayTeam.name}<img src="${m.awayTeam.logo}" width="24" height="24"/></span>
             </div>
             <div class="status"><span class="badge">${m.status}</span> ${minute} • ${m.competition}</div>
-            <a class="btn" href="/go/${encodeURIComponent(m.id)}" target="_blank" rel="noopener noreferrer">Открыть на доноре</a>
+            <a class="btn" href="/player.html?id=${encodeURIComponent(m.id)}">Смотреть на сайте</a>
+            <a class="btn" href="/go/${encodeURIComponent(m.id)}" target="_blank" rel="noopener noreferrer">Источник</a>
           </div>`;
       }).join('');
     }
