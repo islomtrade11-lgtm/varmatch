@@ -12,6 +12,8 @@
     .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; }
     .stat { padding:10px; border:1px solid #33415588; border-radius:10px; }
     .btn { color:white; text-decoration:none; background:#f43f5e; border-radius:8px; padding:8px 10px; display:inline-block; margin-right:8px; }
+    .player-frame { width:100%; min-height:560px; border:0; border-radius:12px; background:#0b1220; }
+    .stream-list { margin-top:10px; display:flex; flex-wrap:wrap; gap:8px; }
   </style>
 </head>
 <body>
@@ -48,13 +50,22 @@
       stats.innerHTML = entries.map(([k, v]) => `<div class="stat"><strong>${k}</strong><div>${v}</div></div>`).join('');
     }
 
-    function mountPlayer(streamUrl, statsUrl, searchUrl) {
+    function mountPlayer(match) {
+      const streamUrl = match.stream;
+      const canEmbed = match.streamEmbed && /^https?:/i.test(streamUrl || '');
+      const streamLinks = (match.streams || []).map((s, idx) =>
+        `<a class="btn" href="${s.url}" target="_blank" rel="noopener noreferrer">Поток ${idx + 1}</a>`
+      ).join('');
+
       playerWrap.innerHTML = `
-        <h3>Донор-страницы</h3>
-        <p>Открывайте только нужные разделы: трансляцию и статистику. Плеер можно доработать отдельным скриптом в новом окне.</p>
-        <a class="btn" href="${streamUrl}" target="_blank" rel="noopener noreferrer">Только трансляция</a>
-        <a class="btn" href="${statsUrl}" target="_blank" rel="noopener noreferrer">Только статистика</a>
-        <a class="btn" href="${searchUrl}" target="_blank" rel="noopener noreferrer">Результаты поиска</a>
+        <h3>Трансляция</h3>
+        ${canEmbed ? `<iframe class="player-frame" src="${streamUrl}" allowfullscreen loading="lazy"></iframe>` : '<p>Встроить поток не удалось, откройте источник вручную.</p>'}
+        <div class="stream-list">
+          ${streamUrl ? `<a class="btn" href="${streamUrl}" target="_blank" rel="noopener noreferrer">Открыть основной поток</a>` : ''}
+          ${streamLinks}
+          <a class="btn" href="${match.donorStatsUrl}" target="_blank" rel="noopener noreferrer">Только статистика</a>
+          <a class="btn" href="${match.donorSearchUrl}" target="_blank" rel="noopener noreferrer">Результаты поиска</a>
+        </div>
       `;
     }
 
@@ -70,7 +81,7 @@
       title.textContent = m.title;
       meta.textContent = `${m.competition} • ${m.status} ${m.minute || ''} • Счёт ${m.score.home}:${m.score.away}`;
       renderStats(m.stats);
-      mountPlayer(m.stream, m.donorStatsUrl, m.donorSearchUrl);
+      mountPlayer(m);
     }
 
     loadMatch();

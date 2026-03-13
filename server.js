@@ -33,6 +33,8 @@ const DB_FILE = getEnv('DB_FILE', './streams_db.json');
 const APP_TITLE = getEnv('APP_TITLE', 'VarMatch TV');
 const APP_VERSION = getEnv('APP_VERSION', 'v3.1');
 const DONOR_STREAM_URL = getEnv('DONOR_STREAM_URL', '');
+const STREAM_DISCOVERY_ENABLED = getEnv('STREAM_DISCOVERY_ENABLED', '1') !== '0';
+const STREAM_SCAN_LIMIT = Math.max(1, Number(getEnv('STREAM_SCAN_LIMIT', 4)) || 4);
 const BASE_UPDATE_CRON = getEnv('REFRESH_MATCHES_CRON', '*/10 * * * *');
 const FOOTBALL_API_URL = getEnv('FOOTBALL_API_URL', 'https://v3.football.api-sports.io/fixtures');
 const FOOTBALL_API_KEY = getEnv('FOOTBALL_API_KEY', '');
@@ -111,6 +113,27 @@ const fetchJsonWithHttps = (url, headers = {}) => new Promise((resolve, reject) 
   request.end();
 });
 
+const fetchTextWithHttps = (url, headers = {}) => new Promise((resolve, reject) => {
+  const request = https.request(url, { method: 'GET', headers }, (response) => {
+    let body = '';
+    response.setEncoding('utf8');
+    response.on('data', (chunk) => {
+      body += chunk;
+    });
+    response.on('end', () => {
+      const ok = (response.statusCode || 500) >= 200 && (response.statusCode || 500) < 300;
+      if (!ok) {
+        reject(new Error(`Donor page error: ${response.statusCode || 500}`));
+        return;
+      }
+      resolve(body);
+    });
+  });
+
+  request.on('error', reject);
+  request.end();
+});
+
 const createDonorUrl = (match, section = 'search') => {
   if (!DONOR_STREAM_URL) return '';
 
@@ -140,6 +163,69 @@ const createDonorUrl = (match, section = 'search') => {
 
 const toIsoDate = (date) => date.toISOString().slice(0, 10);
 const addDays = (date, diff) => new Date(date.getTime() + diff * 86400000);
+
+const collectByRegex = (html, regex) => {
+  const urls = [];
+  let match = regex.exec(html);
+  while (match) {
+    urls.push(match[1]);
+    match = regex.exec(html);
+  }
+  return urls;
+};
+
+const dedupeStreams = (streams) => {
+  const seen = new Set();
+  const unique = [];
+  for (const item of streams) {
+    if (!item?.url || seen.has(item.url)) continue;
+    seen.add(item.url);
+    unique.push(item);
+  }
+  return unique;
+};
+
+const discoverStreamsFromHtml = (html, baseUrl) => {
+  const iframeSources = collectByRegex(html, /<iframe[^>]+src=["']([^"']+)["']/gi);
+  const sourceSources = collectByRegex(html, /<(?:source|video)[^>]+src=["']([^"']+)["']/gi);
+  const directPlaylist = collectByRegex(html, /(https?:\/\/[^"'\s>]+\.(?:m3u8|mpd)(?:\?[^"'\s>]*)?)/gi);
+  const hintedEmbed = collectByRegex(html, /(https?:\/\/[^"'\s>]*(?:embed|player)[^"'\s>]*)/gi);
+  const base = new URL(baseUrl);
+
+  const toAbsolute = (rawUrl) => {
+    try {
+      return new URL(rawUrl, base).toString();
+    } catch {
+      return '';
+    }
+  };
+
+  const candidates = [
+    ...iframeSources.map((url) => ({ provider: 'Donor iframe', type: 'embed', url: toAbsolute(url), embed: true })),
+    ...sourceSources.map((url) => ({ provider: 'Donor video', type: 'direct', url: toAbsolute(url), embed: false })),
+    ...directPlaylist.map((url) => ({ provider: 'Playlist', type: 'direct', url: toAbsolute(url), embed: false })),
+    ...hintedEmbed.map((url) => ({ provider: 'Embedded player', type: 'embed', url: toAbsolute(url), embed: true }))
+  ];
+
+  return dedupeStreams(candidates).filter((stream) => stream.url).slice(0, STREAM_SCAN_LIMIT);
+};
+
+async function discoverStreamsForMatch(match) {
+  if (!DONOR_STREAM_URL || !STREAM_DISCOVERY_ENABLED) return [];
+
+  const donorSearchUrl = createDonorUrl(match, 'search');
+  if (!donorSearchUrl) return [];
+
+  try {
+    const html = globalThis.fetch
+      ? await (await globalThis.fetch(donorSearchUrl, { headers: { 'user-agent': 'Mozilla/5.0 VarMatchBot/1.0' } })).text()
+      : await fetchTextWithHttps(donorSearchUrl, { 'user-agent': 'Mozilla/5.0 VarMatchBot/1.0' });
+    return discoverStreamsFromHtml(html, donorSearchUrl);
+  } catch (error) {
+    console.warn(`⚠️ Не удалось найти встроенный стрим для ${match.id}: ${error.message}`);
+    return [];
+  }
+}
 
 const normalizeStatus = (short) => {
   if (LIVE_STATUSES.has(short)) return short;
@@ -299,16 +385,25 @@ async function refreshLiveMatches() {
   }
 }
 
-function refreshStreams() {
+async function refreshStreams() {
   const db = readDb();
-  const matches = db.matches.map((match) => ({
-    ...match,
-    streams: DONOR_STREAM_URL
+  try {
+    const matches = await Promise.all(db.matches.map(async (match) => {
+    const discovered = await discoverStreamsForMatch(match);
+    const fallback = DONOR_STREAM_URL
       ? [{ provider: 'Donor', type: 'redirect', url: createDonorUrl(match, 'stream'), embed: false }]
-      : []
+      : [];
+
+    return {
+      ...match,
+      streams: discovered.length ? discovered : fallback
+    };
   }));
-  writeDb({ ...db, matches, lastStreamScanAt: new Date().toISOString() });
-  console.log('🎥 Обновлены donor-ссылки трансляций');
+    writeDb({ ...db, matches, lastStreamScanAt: new Date().toISOString() });
+    console.log('🎥 Обновлены ссылки и встроенные трансляции');
+  } catch (error) {
+    console.error('❌ Ошибка сканирования трансляций:', error.message);
+  }
 }
 
 app.get('/healthz', (_req, res) => {
@@ -379,8 +474,10 @@ app.get('/api/matches/:id/stream', (req, res) => {
   return res.json({
     id: item.id,
     title: `${item.homeTeam.name} vs ${item.awayTeam.name}`,
-    stream: donorStreamUrl,
-    streamType: 'redirect',
+    stream: item.streams?.[0]?.url || donorStreamUrl,
+    streamType: item.streams?.[0]?.type || 'redirect',
+    streamEmbed: Boolean(item.streams?.[0]?.embed),
+    streams: item.streams || [],
     donorStatsUrl,
     donorSearchUrl,
     competition: item.competition,
@@ -395,6 +492,9 @@ app.get('/go/:id', (req, res) => {
   const db = readDb();
   const item = db.matches.find((m) => m.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'Матч не найден' });
+  if (item.streams?.[0]) {
+    return res.redirect(`/player.html?id=${encodeURIComponent(item.id)}`);
+  }
   if (!DONOR_STREAM_URL) return res.status(404).json({ error: 'Укажите DONOR_STREAM_URL' });
   return res.redirect(createDonorUrl(item, 'search'));
 });
@@ -405,7 +505,9 @@ cron.schedule(BASE_UPDATE_CRON, () => {
   });
 });
 setInterval(refreshLiveMatches, 30000);
-setInterval(refreshStreams, 10 * 60 * 1000);
+setInterval(() => {
+  refreshStreams();
+}, 10 * 60 * 1000);
 
 refreshMatchesFromApi()
   .then(refreshStreams)
